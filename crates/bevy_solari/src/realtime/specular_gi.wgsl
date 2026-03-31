@@ -22,6 +22,28 @@ const DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD: f32 = 0.4;
 const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0225;
 const TERMINATE_IN_WORLD_CACHE_THRESHOLD: f32 = 0.03;
 
+// Fresnel reflectance at normal incidence from IOR
+fn fresnel_f0_from_ior(ior: f32) -> f32 {
+    let r = (ior - 1.0) / (ior + 1.0);
+    return r * r;
+}
+
+// Schlick approximation for Fresnel reflectance
+fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
+    return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
+}
+
+// Snell's law refraction. Returns reflection direction on total internal reflection.
+fn refract_ray(incident: vec3<f32>, normal: vec3<f32>, eta: f32) -> vec3<f32> {
+    let cos_i = dot(-incident, normal);
+    let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
+    if sin2_t > 1.0 {
+        return reflect(incident, normal);
+    }
+    let cos_t = sqrt(1.0 - sin2_t);
+    return eta * incident + (eta * cos_i - cos_t) * normal;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
@@ -37,6 +59,35 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let wo_unnormalized = view.world_position - surface.world_position;
     let wo = normalize(wo_unnormalized);
+
+    // Glass/transmissive surface handling
+    if surface.material.specular_transmission > 0.0 {
+        let cos_theta = dot(wo, surface.world_normal);
+        let entering = cos_theta > 0.0;
+        let n = select(-surface.world_normal, surface.world_normal, entering);
+        let ior = surface.material.ior;
+        let eta = select(ior, 1.0 / ior, entering);
+
+        let f0 = fresnel_f0_from_ior(ior);
+        let fresnel = fresnel_schlick(abs(cos_theta), f0);
+
+        // Stochastic Fresnel: reflect or refract based on probability
+        var glass_wi: vec3<f32>;
+        let transmission = surface.material.specular_transmission;
+        let transmit_probability = transmission * (1.0 - fresnel);
+        if rand_f(&rng) < transmit_probability {
+            glass_wi = refract_ray(-wo, n, eta);
+        } else {
+            glass_wi = reflect(-wo, n);
+        }
+
+        let glass_radiance = trace_glass_path(surface.world_position, glass_wi, &rng);
+
+        var pixel_color = textureLoad(view_output, global_id.xy);
+        pixel_color += vec4(glass_radiance * view.exposure, 0.0);
+        textureStore(view_output, global_id.xy, pixel_color);
+        return;
+    }
 
     var radiance: vec3<f32>;
     var wi: vec3<f32>;
@@ -169,6 +220,51 @@ fn nee_mis_weight(inverse_p_light: f32, brdf_rays_can_hit: bool, wo_tangent: vec
     let p_light = 1.0 / inverse_p_light;
     let p_bounce = ggx_vndf_pdf(wo_tangent, wi_tangent, ray_hit.material.roughness);
     return power_heuristic(p_light, p_bounce);
+}
+
+fn trace_glass_path(origin: vec3<f32>, initial_wi: vec3<f32>, rng: ptr<function, u32>) -> vec3<f32> {
+    var ray_origin = origin;
+    var wi = initial_wi;
+    var radiance = vec3(0.0);
+    var throughput = vec3(1.0);
+
+    for (var i = 0u; i < 4u; i += 1u) {
+        let ray = trace_ray(ray_origin, wi, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
+        if ray.kind == RAY_QUERY_INTERSECTION_NONE { break; }
+        let ray_hit = resolve_ray_hit_full(ray);
+
+        radiance += throughput * ray_hit.material.emissive;
+
+        if ray_hit.material.specular_transmission > 0.0 {
+            // Hit another glass surface, continue through
+            let cos_theta = dot(-wi, ray_hit.world_normal);
+            let entering = cos_theta > 0.0;
+            let n = select(-ray_hit.world_normal, ray_hit.world_normal, entering);
+            let ior = ray_hit.material.ior;
+            let eta = select(ior, 1.0 / ior, entering);
+
+            let f0 = fresnel_f0_from_ior(ior);
+            let fresnel = fresnel_schlick(abs(cos_theta), f0);
+
+            if rand_f(rng) < fresnel {
+                wi = reflect(wi, n);
+            } else {
+                wi = refract_ray(wi, n, eta);
+            }
+            ray_origin = ray_hit.world_position;
+        } else {
+            // Hit opaque surface — shade with direct lighting + world cache GI
+            let direct_lighting = sample_random_light(ray_hit.world_position, ray_hit.world_normal, rng);
+            let direct_brdf = evaluate_brdf(ray_hit.world_normal, -wi, direct_lighting.wi, ray_hit.material);
+            radiance += throughput * direct_lighting.radiance * direct_lighting.inverse_pdf * direct_brdf;
+
+            radiance += throughput * (ray_hit.material.base_color / PI) *
+                query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, WORLD_CACHE_CELL_LIFETIME, rng);
+            break;
+        }
+    }
+
+    return radiance;
 }
 
 // Don't adjust the size of this struct without also adjusting GI_RESERVOIR_STRUCT_SIZE.

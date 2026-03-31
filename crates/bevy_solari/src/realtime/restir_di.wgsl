@@ -71,6 +71,13 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
+    // Glass surfaces are handled entirely by specular_gi (refraction/reflection)
+    if surface.material.specular_transmission > 0.0 {
+        store_reservoir_a(global_id.xy, empty_reservoir());
+        textureStore(view_output, global_id.xy, vec4(surface.material.emissive * view.exposure, 1.0));
+        return;
+    }
+
     let diffuse_brdf = surface.material.base_color / PI;
     let input_reservoir = load_reservoir_b(global_id.xy);
     let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);

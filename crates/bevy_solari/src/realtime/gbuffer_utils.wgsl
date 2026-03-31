@@ -25,7 +25,8 @@ fn gpixel_resolve(gpixel: vec4<u32>, depth: f32, pixel_id: vec2<u32>, view_size:
     let reflectance = vec3(props.r);
     let metallic = saturate(props.g); // TODO: Not sure why saturate is needed here to prevent NaNs
     let emissive = rgb9e5_to_vec3_(gpixel.g);
-    let material = ResolvedMaterial(base_color, emissive, reflectance, perceptual_roughness, roughness, metallic, 0.0, 1.5);
+    let specular_transmission = props.a;
+    let material = ResolvedMaterial(base_color, emissive, reflectance, perceptual_roughness, roughness, metallic, specular_transmission, 1.5);
 
     return ResolvedGPixel(world_position, world_normal, material);
 }

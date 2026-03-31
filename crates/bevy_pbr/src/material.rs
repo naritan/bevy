@@ -1714,7 +1714,7 @@ where
             AlphaMode::Blend | AlphaMode::Premultiplied | AlphaMode::Add | AlphaMode::Multiply => {
                 RenderPhaseType::Transparent
             }
-            _ if reads_view_transmission_texture => RenderPhaseType::Transmissive,
+            _ if reads_view_transmission_texture && render_method != OpaqueRendererMethod::Deferred => RenderPhaseType::Transmissive,
             AlphaMode::Opaque | AlphaMode::AlphaToCoverage => RenderPhaseType::Opaque,
             AlphaMode::Mask(_) => RenderPhaseType::AlphaMask,
         };
