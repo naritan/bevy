@@ -128,7 +128,11 @@ pub fn prepare_raytracing_scene_bindings(
             emissive: material.emissive.to_vec3(),
             metallic: material.metallic,
             reflectance: LinearRgba::from(material.specular_tint).to_vec3() * material.reflectance,
-            _padding: Default::default(),
+            specular_transmission: material.specular_transmission,
+            ior: material.ior,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
         });
 
         material_id_map.insert(*asset_id, material_id);
@@ -368,7 +372,11 @@ struct GpuMaterial {
     emissive: Vec3,
     metallic: f32,
     reflectance: Vec3,
-    _padding: f32,
+    specular_transmission: f32,
+    ior: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 #[derive(ShaderType)]

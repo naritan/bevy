@@ -1,5 +1,5 @@
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
-#import bevy_pbr::pbr_functions::calculate_tbn_mikktspace
+#import bevy_pbr::pbr_functions::{calculate_tbn_mikktspace, calculate_F0}
 #import bevy_pbr::utils::{rand_f, rand_vec2f, sample_cosine_hemisphere}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
@@ -53,8 +53,9 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
             radiance += mis_weight * throughput * ray_hit.material.emissive;
 
-            // Sample direct lighting, but only if the surface is not mirror-like
-            let is_perfectly_specular = ray_hit.material.roughness <= 0.001 && ray_hit.material.metallic > 0.9999;
+            // Sample direct lighting, but only if the surface is not mirror-like or transmissive
+            let is_transmissive = ray_hit.material.specular_transmission > 0.0;
+            let is_perfectly_specular = (ray_hit.material.roughness <= 0.001 && ray_hit.material.metallic > 0.9999) || is_transmissive;
             if !is_perfectly_specular {
                 let direct_lighting = sample_random_light(ray_hit.world_position, ray_hit.world_normal, &rng);
 
@@ -104,7 +105,54 @@ struct NextBounce {
     perfectly_specular_bounce: bool,
 }
 
+// Fresnel reflectance at normal incidence from IOR
+fn fresnel_f0_from_ior(ior: f32) -> f32 {
+    let r = (ior - 1.0) / (ior + 1.0);
+    return r * r;
+}
+
+// Schlick approximation for Fresnel reflectance
+fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
+    return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
+}
+
+// Snell's law refraction. Returns false if total internal reflection.
+fn refract_ray(incident: vec3<f32>, normal: vec3<f32>, eta: f32) -> vec3<f32> {
+    let cos_i = dot(-incident, normal);
+    let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
+    if sin2_t > 1.0 {
+        // Total internal reflection
+        return reflect(incident, normal);
+    }
+    let cos_t = sqrt(1.0 - sin2_t);
+    return eta * incident + (eta * cos_i - cos_t) * normal;
+}
+
 fn importance_sample_next_bounce(wo: vec3<f32>, ray_hit: ResolvedRayHitFull, rng: ptr<function, u32>) -> NextBounce {
+    // Transmissive material (glass, water, etc.)
+    if ray_hit.material.specular_transmission > 0.0 {
+        let cos_theta = dot(wo, ray_hit.world_normal);
+        let entering = cos_theta > 0.0;
+        let n = select(-ray_hit.world_normal, ray_hit.world_normal, entering);
+        let eta = select(ray_hit.material.ior / 1.0, 1.0 / ray_hit.material.ior, entering);
+
+        let f0 = fresnel_f0_from_ior(ray_hit.material.ior);
+        let fresnel = fresnel_schlick(abs(cos_theta), f0);
+
+        // Stochastic Fresnel: reflect or refract based on probability
+        if rand_f(rng) < fresnel || ray_hit.material.specular_transmission < 1.0 {
+            // Reflect
+            if ray_hit.material.roughness <= 0.001 {
+                return NextBounce(reflect(-wo, n), 1.0, true);
+            }
+            // Rough reflection falls through to standard BRDF below
+        } else {
+            // Refract
+            let refracted = refract_ray(-wo, n, eta);
+            return NextBounce(refracted, 1.0, true);
+        }
+    }
+
     let is_perfectly_specular = ray_hit.material.roughness <= 0.001 && ray_hit.material.metallic > 0.9999;
     if is_perfectly_specular {
         return NextBounce(reflect(-wo, ray_hit.world_normal), 1.0, true);
