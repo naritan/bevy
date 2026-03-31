@@ -5,7 +5,6 @@ use super::{
 use bevy_camera::MainPassResolutionOverride;
 use bevy_core_pipeline::prepass::ViewPrepassTextures;
 use bevy_ecs::{query::QueryItem, world::World};
-use tracing::info;
 use bevy_render::{
     camera::TemporalJitter,
     diagnostic::RecordDiagnostics,
@@ -150,10 +149,6 @@ impl ViewNode for DlssNode<DlssRayReconstructionFeature> {
         let diagnostics = render_context.diagnostic_recorder();
         let command_encoder = render_context.command_encoder();
         let mut dlss_context = dlss_context.context.lock().unwrap();
-
-        if dlss.reset {
-            info!("[DLSS node] RayReconstruction running with reset=TRUE");
-        }
 
         command_encoder.push_debug_group("dlss_ray_reconstruction");
         let time_span = diagnostics.time_span(command_encoder, "dlss_ray_reconstruction");

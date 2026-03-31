@@ -1,4 +1,3 @@
-use tracing::info;
 use super::{Dlss, DlssFeature, DlssSdk};
 use bevy_camera::{Camera3d, CameraMainTextureUsages, MainPassResolutionOverride};
 use bevy_core_pipeline::prepass::{DepthPrepass, MotionVectorPrepass};
@@ -31,7 +30,7 @@ pub fn prepare_dlss<F: DlssFeature>(
         (
             Entity,
             &ExtractedView,
-            &mut Dlss<F>,
+            &Dlss<F>,
             &mut Camera3d,
             &mut CameraMainTextureUsages,
             &mut TemporalJitter,
@@ -54,7 +53,7 @@ pub fn prepare_dlss<F: DlssFeature>(
     for (
         entity,
         view,
-        mut dlss,
+        dlss,
         mut camera_3d,
         mut camera_main_texture_usages,
         mut temporal_jitter,
@@ -102,10 +101,6 @@ pub fn prepare_dlss<F: DlssFeature>(
                 temporal_jitter.offset =
                     F::suggested_jitter(&dlss_context, frame_count.0, render_resolution);
                 mip_bias.0 = F::suggested_mip_bias(&dlss_context, render_resolution);
-
-                // 新規コンテキスト作成時はresetを強制
-                info!("[DLSS prepare] creating new context, setting reset=true (was {})", dlss.reset);
-                dlss.reset = true;
 
                 commands.entity(entity).insert((
                     DlssRenderContext::<F> {
