@@ -21,7 +21,10 @@ pub fn extract_dlss<F: DlssFeature>(
         if dlss.is_some() && camera.is_active && camera_projection.is_perspective() {
             entity_commands.insert(dlss.as_deref().unwrap().clone());
             dlss.as_mut().unwrap().reset = false;
-        } else if cleanup_query.get(entity) == Ok(true) {
+        } else if dlss.is_none() && cleanup_query.get(entity) == Ok(true) {
+            // Dlssコンポーネントが実際に削除された場合のみcleanup
+            // カメラが非アクティブなだけではDlssRenderContextを維持する
+            // （再アクティブ化時にコンテキスト再作成が壊れる問題の回避）
             entity_commands.remove::<(Dlss<F>, DlssRenderContext<F>, MainPassResolutionOverride)>();
         }
     }
