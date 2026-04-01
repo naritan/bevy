@@ -85,7 +85,7 @@ pub fn prepare_raytracing_scene_bindings(
     let mut material_id_map: HashMap<AssetId<StandardMaterial>, u32, FixedHasher> =
         HashMap::default();
     let mut material_id = 0;
-    let mut process_texture = |texture_handle: &Option<Handle<_>>| -> Option<u32> {
+    let mut process_texture = |texture_handle: &Option<Handle<_>>| -> u32 {
         match texture_handle {
             Some(texture_handle) => match texture_assets.get(texture_handle.id()) {
                 Some(texture) => {
@@ -94,28 +94,18 @@ pub fn prepare_raytracing_scene_bindings(
                     if is_new {
                         samplers.push(texture.sampler.deref());
                     }
-                    Some(texture_id)
+                    texture_id
                 }
-                None => None,
+                None => TEXTURE_MAP_NONE,
             },
-            None => Some(TEXTURE_MAP_NONE),
+            None => TEXTURE_MAP_NONE,
         }
     };
     for (asset_id, material) in material_assets.iter() {
-        let Some(base_color_texture_id) = process_texture(&material.base_color_texture) else {
-            continue;
-        };
-        let Some(normal_map_texture_id) = process_texture(&material.normal_map_texture) else {
-            continue;
-        };
-        let Some(emissive_texture_id) = process_texture(&material.emissive_texture) else {
-            continue;
-        };
-        let Some(metallic_roughness_texture_id) =
-            process_texture(&material.metallic_roughness_texture)
-        else {
-            continue;
-        };
+        let base_color_texture_id = process_texture(&material.base_color_texture);
+        let normal_map_texture_id = process_texture(&material.normal_map_texture);
+        let emissive_texture_id = process_texture(&material.emissive_texture);
+        let metallic_roughness_texture_id = process_texture(&material.metallic_roughness_texture);
 
         materials.get_mut().push(GpuMaterial {
             normal_map_texture_id,

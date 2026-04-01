@@ -93,9 +93,10 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let tinted_refract = refract_radiance * surface.material.base_color;
         let current_glass_radiance = reflect_radiance * fresnel + tinted_refract * (1.0 - fresnel);
 
-        // --- Temporal accumulation ---
+        // --- Temporal accumulation (alpha = sample count for optimal convergence) ---
         let ping_pong = (constants.frame_index >> 1u) & 1u;
         var accumulated = current_glass_radiance;
+        var sample_count = 1.0;
 
         if !bool(constants.reset) {
             // Reproject using motion vectors
@@ -115,7 +116,7 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 if !pixel_dissimilar(depth, surface.world_position,
                         prev_surface.world_position, surface.world_normal,
                         prev_surface.world_normal, view) {
-                    // Read previous accumulation value
+                    // Read previous accumulation value (alpha = sample count)
                     var prev_value: vec4f;
                     if ping_pong == 0u {
                         prev_value = textureLoad(glass_history_a, prev_pixel);
@@ -123,16 +124,18 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         prev_value = textureLoad(glass_history_b, prev_pixel);
                     }
 
-                    // alpha > 0 means valid data
                     if prev_value.a > 0.0 {
-                        accumulated = mix(prev_value.rgb, current_glass_radiance, 0.1);
+                        // Blend rate: 1/N for optimal running average, min 0.1 for responsiveness
+                        sample_count = min(prev_value.a + 1.0, 10.0);
+                        let blend = max(1.0 / sample_count, 0.1);
+                        accumulated = mix(prev_value.rgb, current_glass_radiance, blend);
                     }
                 }
             }
         }
 
-        // Write current frame result for next frame
-        let glass_out = vec4(accumulated, 1.0);
+        // Write current frame result (alpha = sample count for next frame)
+        let glass_out = vec4(accumulated, sample_count);
         if ping_pong == 0u {
             textureStore(glass_history_b, global_id.xy, glass_out);
         } else {
@@ -338,7 +341,18 @@ fn trace_glass_path(origin: vec3<f32>, initial_wi: vec3<f32>, rng: ptr<function,
             }
             wc_radiance /= wc_count;
 
-            radiance += throughput * diffuse_brdf * wc_radiance;
+            // Use world cache when warm, fall back to direct lighting when cold
+            var surface_radiance: vec3<f32>;
+            if dot(wc_radiance, vec3(1.0)) > 0.001 {
+                surface_radiance = diffuse_brdf * wc_radiance;
+            } else {
+                // Cold cache: sample direct lighting as fallback
+                let direct = sample_random_light(ray_hit.world_position, ray_hit.world_normal, rng);
+                let nee_brdf = evaluate_brdf(ray_hit.world_normal, -wi, direct.wi, ray_hit.material);
+                surface_radiance = direct.radiance * direct.inverse_pdf * nee_brdf;
+            }
+
+            radiance += throughput * surface_radiance;
             break;
         }
     }
