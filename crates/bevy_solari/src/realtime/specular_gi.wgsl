@@ -1,26 +1,35 @@
 #define_import_path bevy_solari::specular_gi
 
 #import bevy_pbr::pbr_functions::calculate_tbn_mikktspace
+#import bevy_pbr::prepass_bindings::PreviousViewUniforms
 #import bevy_pbr::utils::rand_f
 #import bevy_render::maths::{orthonormalize, PI}
 #import bevy_render::view::View
 #import bevy_solari::brdf::{evaluate_brdf, evaluate_specular_brdf}
-#import bevy_solari::gbuffer_utils::gpixel_resolve
+#import bevy_solari::gbuffer_utils::{gpixel_resolve, pixel_dissimilar}
 #import bevy_solari::sampling::{sample_random_light, random_emissive_light_pdf, sample_ggx_vndf, ggx_vndf_pdf, power_heuristic}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, ResolvedRayHitFull, ResolvedMaterial, RAY_T_MIN, RAY_T_MAX}
-#import bevy_solari::world_cache::{query_world_cache, get_cell_size, WORLD_CACHE_CELL_LIFETIME}
+#import bevy_solari::world_cache::{query_world_cache, query_world_cache_readonly, get_cell_size, WORLD_CACHE_CELL_LIFETIME}
+#import bevy_pbr::utils::rand_vec2f
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(5) var<storage, read_write> gi_reservoirs_a: array<Reservoir>;
 @group(1) @binding(7) var gbuffer: texture_2d<u32>;
 @group(1) @binding(8) var depth_buffer: texture_depth_2d;
+@group(1) @binding(9) var motion_vectors: texture_2d<f32>;
+@group(1) @binding(10) var previous_gbuffer: texture_2d<u32>;
+@group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
 @group(1) @binding(12) var<uniform> view: View;
+@group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(24) var glass_history_a: texture_storage_2d<rgba16float, read_write>;
+@group(1) @binding(25) var glass_history_b: texture_storage_2d<rgba16float, read_write>;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
 const DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD: f32 = 0.4;
 const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0225;
 const TERMINATE_IN_WORLD_CACHE_THRESHOLD: f32 = 0.03;
+const GLASS_WC_SAMPLES: u32 = 8u;
 
 // Fresnel reflectance at normal incidence from IOR
 fn fresnel_f0_from_ior(ior: f32) -> f32 {
@@ -82,10 +91,56 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Tint refracted light by base_color (colored glass)
         let tinted_refract = refract_radiance * surface.material.base_color;
-        let glass_radiance = reflect_radiance * fresnel + tinted_refract * (1.0 - fresnel);
+        let current_glass_radiance = reflect_radiance * fresnel + tinted_refract * (1.0 - fresnel);
+
+        // --- Temporal accumulation ---
+        let ping_pong = (constants.frame_index >> 1u) & 1u;
+        var accumulated = current_glass_radiance;
+
+        if !bool(constants.reset) {
+            // Reproject using motion vectors
+            let motion_vector = textureLoad(motion_vectors, global_id.xy, 0).xy;
+            let prev_pixel_f = round(vec2f(global_id.xy) - motion_vector * view.main_pass_viewport.zw);
+
+            if all(prev_pixel_f >= vec2(0.0)) && all(prev_pixel_f < view.main_pass_viewport.zw) {
+                let prev_pixel = vec2u(prev_pixel_f);
+
+                // Geometry validation
+                let prev_depth = textureLoad(previous_depth_buffer, prev_pixel, 0);
+                let prev_surface = gpixel_resolve(
+                    textureLoad(previous_gbuffer, prev_pixel, 0),
+                    prev_depth, prev_pixel,
+                    view.main_pass_viewport.zw, previous_view.world_from_clip);
+
+                if !pixel_dissimilar(depth, surface.world_position,
+                        prev_surface.world_position, surface.world_normal,
+                        prev_surface.world_normal, view) {
+                    // Read previous accumulation value
+                    var prev_value: vec4f;
+                    if ping_pong == 0u {
+                        prev_value = textureLoad(glass_history_a, prev_pixel);
+                    } else {
+                        prev_value = textureLoad(glass_history_b, prev_pixel);
+                    }
+
+                    // alpha > 0 means valid data
+                    if prev_value.a > 0.0 {
+                        accumulated = mix(prev_value.rgb, current_glass_radiance, 0.1);
+                    }
+                }
+            }
+        }
+
+        // Write current frame result for next frame
+        let glass_out = vec4(accumulated, 1.0);
+        if ping_pong == 0u {
+            textureStore(glass_history_b, global_id.xy, glass_out);
+        } else {
+            textureStore(glass_history_a, global_id.xy, glass_out);
+        }
 
         var pixel_color = textureLoad(view_output, global_id.xy);
-        pixel_color += vec4(glass_radiance * transmission * view.exposure, 0.0);
+        pixel_color += vec4(accumulated * transmission * view.exposure, 0.0);
         textureStore(view_output, global_id.xy, pixel_color);
     }
 
@@ -258,9 +313,32 @@ fn trace_glass_path(origin: vec3<f32>, initial_wi: vec3<f32>, rng: ptr<function,
             }
             ray_origin = ray_hit.world_position;
         } else {
-            // Hit opaque surface — use world cache only for stable lighting (avoids mosaic noise)
-            radiance += throughput * (ray_hit.material.base_color / PI) *
-                query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, WORLD_CACHE_CELL_LIFETIME, rng);
+            // Hit opaque surface — multi-sample world cache to reduce mosaic artifacts
+            let diffuse_brdf = ray_hit.material.base_color / PI;
+
+            // Query at original position (maintains cell lifetime)
+            var wc_radiance = query_world_cache(
+                ray_hit.world_position, ray_hit.geometric_world_normal,
+                view.world_position, WORLD_CACHE_CELL_LIFETIME, rng);
+            var wc_count = 1.0;
+
+            // Additional jittered samples (read-only, no cache pollution)
+            let cell_size = get_cell_size(ray_hit.world_position, view.world_position);
+            let jitter_TBN = orthonormalize(ray_hit.geometric_world_normal);
+            for (var s = 0u; s < GLASS_WC_SAMPLES; s++) {
+                let offset = (rand_vec2f(rng) * 2.0 - 1.0) * cell_size * 0.5;
+                let jittered_pos = ray_hit.world_position
+                    + offset.x * jitter_TBN[0] + offset.y * jitter_TBN[1];
+                let sample = query_world_cache_readonly(
+                    jittered_pos, ray_hit.geometric_world_normal, view.world_position);
+                if sample.a > 0.0 {
+                    wc_radiance += sample.rgb;
+                    wc_count += 1.0;
+                }
+            }
+            wc_radiance /= wc_count;
+
+            radiance += throughput * diffuse_brdf * wc_radiance;
             break;
         }
     }

@@ -91,6 +91,25 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
 
     return vec3(0.0);
 }
+
+fn query_world_cache_readonly(world_position: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>) -> vec4<f32> {
+    let cell_size = get_cell_size(world_position, view_position);
+    let wp_q = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));
+    let wn_q = bitcast<vec3<u32>>(quantize_normal(world_normal));
+    var key = compute_key(wp_q, wn_q);
+    let checksum = compute_checksum(wp_q, wn_q);
+
+    for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
+        let existing = atomicLoad(&world_cache_checksums[key]);
+        if existing == checksum {
+            return vec4(world_cache_radiance[key].rgb, 1.0);
+        } else if existing == WORLD_CACHE_EMPTY_CELL {
+            return vec4(0.0);
+        }
+        key += 1u;
+    }
+    return vec4(0.0);
+}
 #endif
 
 fn get_cell_size(world_position: vec3<f32>, view_position: vec3<f32>) -> f32 {
