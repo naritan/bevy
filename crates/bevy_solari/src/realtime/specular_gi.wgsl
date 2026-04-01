@@ -60,44 +60,48 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let wo_unnormalized = view.world_position - surface.world_position;
     let wo = normalize(wo_unnormalized);
 
-    // Glass/transmissive surface handling
-    if surface.material.specular_transmission > 0.0 {
-        let cos_theta = dot(wo, surface.world_normal);
-        let entering = cos_theta > 0.0;
+    let transmission = surface.material.specular_transmission;
+
+    // Glass refraction/reflection contribution (weighted by transmission)
+    if transmission > 0.0 {
+        let glass_cos_theta = dot(wo, surface.world_normal);
+        let entering = glass_cos_theta > 0.0;
         let n = select(-surface.world_normal, surface.world_normal, entering);
         let ior = surface.material.ior;
         let eta = select(ior, 1.0 / ior, entering);
 
         let f0 = fresnel_f0_from_ior(ior);
-        let fresnel = fresnel_schlick(abs(cos_theta), f0);
+        let fresnel = fresnel_schlick(abs(glass_cos_theta), f0);
 
-        // Stochastic Fresnel: reflect or refract based on probability
-        var glass_wi: vec3<f32>;
-        let transmission = surface.material.specular_transmission;
-        let transmit_probability = transmission * (1.0 - fresnel);
-        if rand_f(&rng) < transmit_probability {
-            glass_wi = refract_ray(-wo, n, eta);
-        } else {
-            glass_wi = reflect(-wo, n);
-        }
+        // Trace both reflection and refraction
+        let reflect_wi = reflect(-wo, n);
+        let refract_wi = refract_ray(-wo, n, eta);
 
-        let glass_radiance = trace_glass_path(surface.world_position, glass_wi, &rng);
+        let reflect_radiance = trace_glass_path(surface.world_position, reflect_wi, &rng);
+        let refract_radiance = trace_glass_path(surface.world_position, refract_wi, &rng);
+
+        // Tint refracted light by base_color (colored glass)
+        let tinted_refract = refract_radiance * surface.material.base_color;
+        let glass_radiance = reflect_radiance * fresnel + tinted_refract * (1.0 - fresnel);
 
         var pixel_color = textureLoad(view_output, global_id.xy);
-        pixel_color += vec4(glass_radiance * view.exposure, 0.0);
+        pixel_color += vec4(glass_radiance * transmission * view.exposure, 0.0);
         textureStore(view_output, global_id.xy, pixel_color);
-        return;
     }
+
+    // Fully transmissive: skip opaque specular
+    if transmission >= 1.0 { return; }
+
+    // Opaque specular contribution (weighted by 1 - transmission)
+    let opaque_weight = 1.0 - transmission;
 
     var radiance: vec3<f32>;
     var wi: vec3<f32>;
     if surface.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
-        // Surface is very rough, reuse the ReSTIR GI reservoir
         let gi_reservoir = gi_reservoirs_a[pixel_index];
         wi = normalize(gi_reservoir.sample_point_world_position - surface.world_position);
         radiance = gi_reservoir.radiance * gi_reservoir.unbiased_contribution_weight;
     } else {
-        // Surface is glossy or mirror-like, trace a new path
         let TBN = orthonormalize(surface.world_normal);
         let T = TBN[0];
         let B = TBN[1];
@@ -107,7 +111,6 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
         wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
         let pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, surface.material.roughness);
 
-        // https://d1qx31qr3h6wln.cloudfront.net/publications/mueller21realtime.pdf#subsection.3.4, equation (4)
         let cos_theta = saturate(dot(wo, surface.world_normal));
         var a0 = dot(wo_unnormalized, wo_unnormalized) / (4.0 * PI * cos_theta);
         a0 *= TERMINATE_IN_WORLD_CACHE_THRESHOLD;
@@ -118,7 +121,7 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let brdf = evaluate_specular_brdf(surface.world_normal, wo, wi, surface.material.base_color, surface.material.metallic,
         surface.material.reflectance, surface.material.perceptual_roughness, surface.material.roughness);
     let cos_theta = saturate(dot(wi, surface.world_normal));
-    radiance *= brdf * cos_theta * view.exposure;
+    radiance *= brdf * cos_theta * view.exposure * opaque_weight;
 
     var pixel_color = textureLoad(view_output, global_id.xy);
     pixel_color += vec4(radiance, 0.0);
@@ -236,7 +239,7 @@ fn trace_glass_path(origin: vec3<f32>, initial_wi: vec3<f32>, rng: ptr<function,
         radiance += throughput * ray_hit.material.emissive;
 
         if ray_hit.material.specular_transmission > 0.0 {
-            // Hit another glass surface, continue through
+            // Hit glass surface: tint throughput by glass color, continue through
             let cos_theta = dot(-wi, ray_hit.world_normal);
             let entering = cos_theta > 0.0;
             let n = select(-ray_hit.world_normal, ray_hit.world_normal, entering);
@@ -250,14 +253,12 @@ fn trace_glass_path(origin: vec3<f32>, initial_wi: vec3<f32>, rng: ptr<function,
                 wi = reflect(wi, n);
             } else {
                 wi = refract_ray(wi, n, eta);
+                // Tint transmitted light by glass color
+                throughput *= ray_hit.material.base_color;
             }
             ray_origin = ray_hit.world_position;
         } else {
-            // Hit opaque surface — shade with direct lighting + world cache GI
-            let direct_lighting = sample_random_light(ray_hit.world_position, ray_hit.world_normal, rng);
-            let direct_brdf = evaluate_brdf(ray_hit.world_normal, -wi, direct_lighting.wi, ray_hit.material);
-            radiance += throughput * direct_lighting.radiance * direct_lighting.inverse_pdf * direct_brdf;
-
+            // Hit opaque surface — use world cache only for stable lighting (avoids mosaic noise)
             radiance += throughput * (ray_hit.material.base_color / PI) *
                 query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, WORLD_CACHE_CELL_LIFETIME, rng);
             break;

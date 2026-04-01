@@ -3,7 +3,7 @@
 #import bevy_pbr::lighting::D_GGX
 #import bevy_pbr::utils::{rand_f, rand_vec2f, rand_u, rand_range_u}
 #import bevy_render::maths::{PI_2, orthonormalize}
-#import bevy_solari::scene_bindings::{trace_ray, RAY_T_MIN, RAY_T_MAX, light_sources, directional_lights, LightSource, LIGHT_SOURCE_KIND_DIRECTIONAL, resolve_triangle_data_full, ResolvedRayHitFull}
+#import bevy_solari::scene_bindings::{trace_ray, RAY_T_MIN, RAY_T_MAX, light_sources, directional_lights, LightSource, LIGHT_SOURCE_KIND_DIRECTIONAL, resolve_triangle_data_full, ResolvedRayHitFull, get_instance_transmission}
 
 fn power_heuristic(f: f32, g: f32) -> f32 {
     return balance_heuristic(f * f, g * g);
@@ -186,6 +186,11 @@ fn resolve_and_calculate_light_contribution(light_sample: LightSample, ray_origi
     return LightContributionNoPdf(light_contribution.radiance, light_contribution.wi);
 }
 
+// Get specular_transmission for a ray hit (lightweight, no texture sampling)
+fn get_hit_transmission(ray_hit: RayIntersection) -> f32 {
+    return get_instance_transmission(ray_hit.instance_index);
+}
+
 fn trace_light_visibility(ray_origin: vec3<f32>, light_sample_world_position: vec4<f32>) -> f32 {
     var ray_direction = light_sample_world_position.xyz;
     var ray_t_max = RAY_T_MAX;
@@ -199,8 +204,24 @@ fn trace_light_visibility(ray_origin: vec3<f32>, light_sample_world_position: ve
 
     if ray_t_max < RAY_T_MIN { return 0.0; }
 
-    let ray_hit = trace_ray(ray_origin, ray_direction, RAY_T_MIN, ray_t_max, RAY_FLAG_TERMINATE_ON_FIRST_HIT);
-    return f32(ray_hit.kind == RAY_QUERY_INTERSECTION_NONE);
+    // Trace through glass surfaces (up to 4 layers)
+    var origin = ray_origin;
+    var visibility = 1.0;
+    for (var i = 0u; i < 4u; i += 1u) {
+        let ray_hit = trace_ray(origin, ray_direction, RAY_T_MIN, ray_t_max, RAY_FLAG_NONE);
+        if ray_hit.kind == RAY_QUERY_INTERSECTION_NONE { return visibility; }
+
+        let transmission = get_hit_transmission(ray_hit);
+        if transmission <= 0.0 { return 0.0; } // Opaque: fully blocked
+
+        // Glass: attenuate and continue
+        visibility *= transmission;
+        let advance = ray_hit.t + RAY_T_MIN;
+        origin += ray_direction * advance;
+        ray_t_max -= advance;
+        if ray_t_max < RAY_T_MIN { return visibility; }
+    }
+    return visibility;
 }
 
 fn trace_point_visibility(ray_origin: vec3<f32>, point: vec3<f32>) -> f32 {
@@ -208,11 +229,27 @@ fn trace_point_visibility(ray_origin: vec3<f32>, point: vec3<f32>) -> f32 {
     let dist = length(ray);
     let ray_direction = ray / dist;
 
-    let ray_t_max = dist - RAY_T_MIN - RAY_T_MIN;
+    var ray_t_max = dist - RAY_T_MIN - RAY_T_MIN;
     if ray_t_max < RAY_T_MIN { return 0.0; }
 
-    let ray_hit = trace_ray(ray_origin, ray_direction, RAY_T_MIN, ray_t_max, RAY_FLAG_TERMINATE_ON_FIRST_HIT);
-    return f32(ray_hit.kind == RAY_QUERY_INTERSECTION_NONE);
+    // Trace through glass surfaces (up to 4 layers)
+    var origin = ray_origin;
+    var visibility = 1.0;
+    for (var i = 0u; i < 4u; i += 1u) {
+        let ray_hit = trace_ray(origin, ray_direction, RAY_T_MIN, ray_t_max, RAY_FLAG_NONE);
+        if ray_hit.kind == RAY_QUERY_INTERSECTION_NONE { return visibility; }
+
+        let transmission = get_hit_transmission(ray_hit);
+        if transmission <= 0.0 { return 0.0; } // Opaque: fully blocked
+
+        // Glass: attenuate and continue
+        visibility *= transmission;
+        let advance = ray_hit.t + RAY_T_MIN;
+        origin += ray_direction * advance;
+        ray_t_max -= advance;
+        if ray_t_max < RAY_T_MIN { return visibility; }
+    }
+    return visibility;
 }
 
 // https://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.9.pdf#0004286901.INDD%3ASec22%3A297

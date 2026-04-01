@@ -63,12 +63,6 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
-    // Glass surfaces: skip diffuse GI (handled by specular_gi refraction)
-    if surface.material.specular_transmission > 0.0 {
-        gi_reservoirs_a[pixel_index] = empty_reservoir();
-        return;
-    }
-
     let input_reservoir = gi_reservoirs_b[pixel_index];
     let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
     let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
@@ -90,7 +84,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let brdf = evaluate_diffuse_brdf(surface.material.base_color, surface.material.metallic);
 
     var pixel_color = textureLoad(view_output, global_id.xy);
-    pixel_color += vec4(merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * view.exposure * brdf, 0.0);
+    // Glass: scale diffuse GI by (1 - transmission)
+    let opaque_weight = 1.0 - surface.material.specular_transmission;
+    pixel_color += vec4(merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * view.exposure * brdf * opaque_weight, 0.0);
     textureStore(view_output, global_id.xy, pixel_color);
 }
 

@@ -92,6 +92,12 @@ const RAY_T_MAX = 100000.0f;
 
 const RAY_NO_CULL = 0xFFu;
 
+// Lightweight transmission check for shadow rays (no texture sampling)
+fn get_instance_transmission(instance_index: u32) -> f32 {
+    let mat_id = material_ids[instance_index];
+    return materials[mat_id].specular_transmission;
+}
+
 fn trace_ray(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32) -> RayIntersection {
     let ray = RayDesc(ray_flag, RAY_NO_CULL, ray_t_min, ray_t_max, ray_origin, ray_direction);
     var rq: ray_query;
