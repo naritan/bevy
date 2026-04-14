@@ -60,6 +60,8 @@ pub struct SolariLightingResources {
     pub world_cache_active_cell_indices: Buffer,
     pub world_cache_active_cells_count: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
+    pub glass_history_a: TextureView,
+    pub glass_history_b: TextureView,
     pub view_size: UVec2,
 }
 
@@ -225,6 +227,22 @@ pub fn prepare_solari_lighting_resources(
             mapped_at_creation: false,
         });
 
+        let glass_history = |name| {
+            let tex = render_device.create_texture(&TextureDescriptor {
+                label: Some(name),
+                size: view_size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            });
+            tex.create_view(&TextureViewDescriptor::default())
+        };
+        let glass_history_a = glass_history("solari_lighting_glass_history_a");
+        let glass_history_b = glass_history("solari_lighting_glass_history_b");
+
         commands.entity(entity).insert(SolariLightingResources {
             light_tile_samples,
             light_tile_resolved_samples,
@@ -243,6 +261,8 @@ pub fn prepare_solari_lighting_resources(
             world_cache_active_cell_indices,
             world_cache_active_cells_count,
             world_cache_active_cells_dispatch,
+            glass_history_a,
+            glass_history_b,
             view_size,
         });
 

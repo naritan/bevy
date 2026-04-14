@@ -194,6 +194,8 @@ impl ViewNode for SolariLightingNode {
                 s.world_cache_b.as_entire_binding(),
                 s.world_cache_active_cell_indices.as_entire_binding(),
                 s.world_cache_active_cells_count.as_entire_binding(),
+                &s.glass_history_a,
+                &s.glass_history_b,
             )),
         );
         let bind_group_world_cache_active_cells_dispatch =
@@ -392,6 +394,8 @@ impl FromWorld for SolariLightingNode {
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
+                    texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
+                    texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
                 ),
             ),
         );
