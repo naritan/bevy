@@ -280,19 +280,6 @@ pub fn prepare_windows(
             Ok(frame) => {
                 window.set_swapchain_texture(frame);
             }
-            Err(wgpu::SurfaceError::Outdated) => {
-                render_device.configure_surface(surface, &surface_data.configuration);
-                let frame = match surface.get_current_texture() {
-                    Ok(frame) => frame,
-                    Err(err) => {
-                        // This is a common occurrence on X11 and Xwayland with NVIDIA drivers
-                        // when opening and resizing the window.
-                        warn!("Couldn't get swap chain texture after configuring. Cause: '{err}'");
-                        continue;
-                    }
-                };
-                window.set_swapchain_texture(frame);
-            }
             #[cfg(target_os = "linux")]
             Err(wgpu::SurfaceError::Timeout) if may_erroneously_timeout() => {
                 tracing::trace!(
@@ -301,7 +288,28 @@ pub fn prepare_windows(
                 );
             }
             Err(err) => {
-                panic!("Couldn't get swap chain texture, operation unrecoverable: {err}");
+                // Outdated/Lost/Other はサーフェス再設定でリトライ
+                // （HDR切替/別ウィンドウのGPU使用/ディスプレイ状態変化等で発生）
+                // OutOfMemory 等の真に復旧不能なエラーのみ panic
+                match err {
+                    wgpu::SurfaceError::Outdated
+                    | wgpu::SurfaceError::Lost
+                    | wgpu::SurfaceError::Other => {
+                        warn!("Swap chain lost ({err}), reconfiguring surface...");
+                        render_device.configure_surface(surface, &surface_data.configuration);
+                        let frame = match surface.get_current_texture() {
+                            Ok(frame) => frame,
+                            Err(err) => {
+                                warn!("Couldn't get swap chain texture after reconfiguring. Cause: '{err}'. Skipping frame.");
+                                continue;
+                            }
+                        };
+                        window.set_swapchain_texture(frame);
+                    }
+                    _ => {
+                        panic!("Couldn't get swap chain texture, operation unrecoverable: {err}");
+                    }
+                }
             }
         }
         window.swap_chain_texture_format = Some(surface_data.configuration.format);
